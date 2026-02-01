@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Slender 3D - Multi-Cleanup</title>
+    <title>Slender 3D - Multiplayer Fix</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; touch-action: none; }
@@ -16,7 +16,6 @@
         canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
         .hidden { display: none !important; }
         #crosshair { position: absolute; top: 50%; left: 50%; color: rgba(255,255,255,0.5); transform: translate(-50%, -50%); z-index: 20; pointer-events: none; font-size: 20px; }
-        
         #chat-container { position: absolute; bottom: 20px; left: 20px; width: 300px; z-index: 40; background: rgba(0,0,0,0.5); border-radius: 5px; display: flex; flex-direction: column; }
         #chat-messages { height: 120px; overflow-y: auto; color: white; font-size: 13px; padding: 10px; display: flex; flex-direction: column; border-bottom: 1px solid #333; }
         #chat-input { background: rgba(0,0,0,0.8); border: 1px solid #555; width: calc(100% - 20px); margin: 5px; padding: 5px; color: white; outline: none; }
@@ -35,7 +34,7 @@
             <button class="btn-join" onclick="connectToHost()">UNIRSE AL JUEGO</button>
         </div>
         <button id="start-btn" class="btn-start" onclick="startGame()">INICIAR PARTIDA</button>
-        <div id="status-msg" style="color: #f1c40f; margin-top: 10px;">Haz clic para jugar</div>
+        <div id="status-msg" style="color: #f1c40f; margin-top: 10px;">Crea una partida o únete a una</div>
     </div>
 </div>
 
@@ -78,6 +77,136 @@
     let dirX = 1, dirY = 0, planeX = 0, planeY = 0.66;
     let moveSpeed = 0.07, mouseSensitivity = 0.0025;
 
+    peer.on('open', id => {
+        myId = id;
+        document.getElementById('my-id').innerText = id;
+        players[id] = { x: posX, y: posY, color: '#3498db', isDead: false };
+        document.getElementById('start-btn').style.display = 'block'; 
+    });
+
+    // Lógica del Servidor (Host)
+    peer.on('connection', conn => {
+        conn.on('open', () => {
+            connections[conn.peer] = conn;
+            players[conn.peer] = { x: 1.5, y: 1.5, color: '#e67e22', isDead: false };
+            addChatMessage("Sistema", "Jugador conectado.");
+            syncToAll();
+        });
+
+        conn.on('data', handleData);
+
+        conn.on('close', () => {
+            handleDisconnect(conn.peer);
+        });
+    });
+
+    function handleDisconnect(peerId) {
+        if (players[peerId]) {
+            addChatMessage("Sistema", "Jugador desconectado.");
+            delete connections[peerId];
+            delete players[peerId];
+            
+            // SI SOLO QUEDA EL HOST, TERMINAR
+            if (Object.keys(players).length <= 1 && gameStarted) {
+                alert("Partida terminada: Te has quedado solo.");
+                location.reload();
+            }
+            syncToAll();
+        }
+    }
+
+    function handleData(data) {
+        if (data.type === 'move') {
+            if(players[data.id]) {
+                players[data.id].x = data.x;
+                players[data.id].y = data.y;
+                players[data.id].isDead = data.isDead;
+            }
+        } else if (data.type === 'chat') {
+            addChatMessage(data.sender, data.text);
+            if (!hostConn) broadcast(data, data.sender);
+        } else if (data.type === 'collect') {
+            if(notes[data.index] && !notes[data.index].collected) {
+                notes[data.index].collected = true;
+                notesCollected++;
+                if(notesCollected >= 8) alert("¡OBJETIVO COMPLETADO!");
+                syncToAll();
+            }
+        } else if (data.type === 'update') {
+            // Sincronización para clientes
+            notes = data.notes;
+            slenderman = data.slenderman;
+            notesCollected = data.notesCollected;
+            if(data.gameStarted && !gameStarted) {
+                gameStarted = true;
+                document.getElementById('ui').classList.add('hidden');
+            }
+            // Limpiar "fantasmas" comparando la lista del host con la local
+            let incomingPlayers = data.players;
+            for(let id in players) {
+                if(id !== myId && !incomingPlayers[id]) delete players[id];
+            }
+            for(let id in incomingPlayers) {
+                if(id !== myId) players[id] = incomingPlayers[id];
+            }
+        }
+    }
+
+    function connectToHost() {
+        const hId = document.getElementById('peer-id-input').value;
+        if(!hId) return;
+        hostConn = peer.connect(hId);
+        hostConn.on('open', () => {
+            document.getElementById('setup-controls').classList.add('hidden');
+            document.getElementById('status-msg').innerText = "Conectado. Esperando inicio...";
+            setInterval(() => {
+                if(hostConn.open) hostConn.send({ type: 'move', id: myId, x: posX, y: posY, isDead: isDead });
+            }, 30);
+        });
+        hostConn.on('data', handleData);
+        hostConn.on('close', () => {
+            alert("El Host ha cerrado la partida.");
+            location.reload();
+        });
+    }
+
+    function startGame() {
+        if (Object.keys(players).length < 2) {
+            alert("Necesitas al menos otro jugador para iniciar.");
+            return;
+        }
+        gameStarted = true;
+        document.getElementById('ui').classList.add('hidden');
+        notes = [];
+        for(let i=0; i<8; i++) {
+            let rx, ry;
+            do { rx = Math.floor(Math.random()*13)+1; ry = Math.floor(Math.random()*13)+1; } 
+            while(worldMap[rx][ry] !== 0);
+            notes.push({ x: rx + 0.5, y: ry + 0.5, collected: false });
+        }
+        slenderman.active = true;
+        syncToAll();
+    }
+
+    function broadcast(data, exclude = null) {
+        for (let id in connections) {
+            if (connections[id].open && id !== exclude) connections[id].send(data);
+        }
+        if (hostConn && hostConn.open && exclude !== 'host') hostConn.send(data);
+    }
+
+    function syncToAll() {
+        if(hostConn) return; // Solo el host sincroniza el estado global
+        broadcast({ type: 'update', players, notes, slenderman, gameStarted, notesCollected });
+    }
+
+    function addChatMessage(sender, text) {
+        const div = document.createElement('div');
+        div.innerHTML = `<span style="color:#3498db">${sender.substring(0,5)}:</span> ${text}`;
+        chatMessages.appendChild(div);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
     chatInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && chatInput.value.trim() !== "") {
             const msg = chatInput.value;
@@ -88,13 +217,7 @@
         }
     });
 
-    function addChatMessage(sender, text) {
-        const div = document.createElement('div');
-        div.innerHTML = `<span style="color:#3498db">${sender.substring(0,5)}:</span> ${text}`;
-        chatMessages.appendChild(div);
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-    }
-
+    // --- MOTOR RENDER Y MOVIMIENTO (Sin cambios mayores, solo integración) ---
     canvas.addEventListener('click', () => { if(!chatInput.matches(':focus')) canvas.requestPointerLock(); });
 
     document.addEventListener('mousemove', (e) => {
@@ -109,159 +232,34 @@
         }
     });
 
-    peer.on('open', id => {
-        myId = id;
-        document.getElementById('my-id').innerText = id;
-        players[id] = { x: posX, y: posY, color: '#3498db', isDead: false };
-        document.getElementById('start-btn').style.display = 'block'; 
-    });
-
-    peer.on('connection', conn => {
-        conn.on('open', () => {
-            connections[conn.peer] = conn;
-            players[conn.peer] = { x: 1.5, y: 1.5, color: '#e67e22', isDead: false };
-            addChatMessage("Sistema", "Un jugador se ha unido.");
-            syncToAll();
-        });
-        conn.on('data', handleData);
-        
-        // LIMPIEZA DE JUGADORES FANTASMA (HOST SIDE)
-        conn.on('close', () => {
-            addChatMessage("Sistema", "Un jugador abandonó.");
-            delete connections[conn.peer];
-            delete players[conn.peer];
-            
-            // Si solo quedas tú, terminar partida (como en una llamada de 2)
-            if (Object.keys(players).length <= 1 && gameStarted) {
-                alert("Partida terminada: No hay más jugadores.");
-                location.reload();
-            }
-            syncToAll(); 
-        });
-    });
-
-    function handleData(data) {
-        if (data.type === 'move') {
-            if(players[data.id]) {
-                players[data.id].x = data.x;
-                players[data.id].y = data.y;
-                players[data.id].isDead = data.isDead;
-            }
-        } else if (data.type === 'chat') {
-            addChatMessage(data.sender, data.text);
-            if (!hostConn) broadcast(data, data.sender);
-        } else if (data.type === 'collect') {
-            if(!notes[data.index].collected) {
-                notes[data.index].collected = true;
-                notesCollected++;
-                if(notesCollected >= 8) alert("¡OBJETIVO COMPLETADO! Han recogido todas las páginas.");
-                syncToAll();
-            }
-        } else if (data.type === 'update') {
-            notes = data.notes;
-            slenderman = data.slenderman;
-            notesCollected = data.notesCollected;
-            if(data.gameStarted && !gameStarted) {
-                gameStarted = true;
-                document.getElementById('ui').classList.add('hidden');
-            }
-            // Sincronizar lista de jugadores y limpiar los que ya no están en la data recibida
-            let newPlayers = data.players;
-            for(let id in players) { if(id !== myId && !newPlayers[id]) delete players[id]; }
-            for(let id in newPlayers) { if(id !== myId) players[id] = newPlayers[id]; }
-        }
-    }
-
-    function broadcast(data, exclude = null) {
-        for (let id in connections) {
-            if (connections[id].open && id !== exclude) connections[id].send(data);
-        }
-        if (hostConn && hostConn.open && exclude !== 'host') hostConn.send(data);
-    }
-
-    function connectToHost() {
-        const hId = document.getElementById('peer-id-input').value;
-        if(!hId) return;
-        hostConn = peer.connect(hId);
-        hostConn.on('open', () => {
-            document.getElementById('setup-controls').classList.add('hidden');
-            document.getElementById('status-msg').innerText = "Conectado. Esperando Host...";
-            setInterval(() => {
-                if(hostConn.open) hostConn.send({ type: 'move', id: myId, x: posX, y: posY, isDead: isDead });
-            }, 30);
-        });
-        hostConn.on('data', handleData);
-        
-        // SI EL HOST "CUELGA"
-        hostConn.on('close', () => {
-            alert("Conexión perdida con el Host.");
-            location.reload();
-        });
-    }
-
-    function startGame() {
-        gameStarted = true;
-        document.getElementById('ui').classList.add('hidden');
-        notes = [];
-        for(let i=0; i<8; i++) {
-            let rx, ry;
-            do { rx = Math.floor(Math.random()*13)+1; ry = Math.floor(Math.random()*13)+1; } 
-            while(worldMap[rx][ry] !== 0);
-            notes.push({ x: rx + 0.5, y: ry + 0.5, collected: false });
-        }
-        slenderman.active = true;
-        syncToAll();
-    }
-
-    function syncToAll() {
-        if(hostConn) return;
-        const p = { type: 'update', players, notes, slenderman, gameStarted, notesCollected };
-        broadcast(p);
-    }
-
     let keys = {};
     window.onkeydown = e => keys[e.code] = true;
     window.onkeyup = e => keys[e.code] = false;
 
     function handleMovement() {
         if(!gameStarted || isDead) return;
+        let nextX = posX, nextY = posY;
+        if(keys['KeyW']) { nextX += dirX * moveSpeed; nextY += dirY * moveSpeed; }
+        if(keys['KeyS']) { nextX -= dirX * moveSpeed; nextY -= dirY * moveSpeed; }
+        if(keys['KeyA']) { nextX += dirY * moveSpeed; nextY -= dirX * moveSpeed; }
+        if(keys['KeyD']) { nextX -= dirY * moveSpeed; nextY += dirX * moveSpeed; }
         
-        if(keys['KeyW']) {
-            if(worldMap[Math.floor(posX + dirX * moveSpeed)][Math.floor(posY)] === 0) posX += dirX * moveSpeed;
-            if(worldMap[Math.floor(posX)][Math.floor(posY + dirY * moveSpeed)] === 0) posY += dirY * moveSpeed;
-        }
-        if(keys['KeyS']) {
-            if(worldMap[Math.floor(posX - dirX * moveSpeed)][Math.floor(posY)] === 0) posX -= dirX * moveSpeed;
-            if(worldMap[Math.floor(posX)][Math.floor(posY - dirY * moveSpeed)] === 0) posY -= dirY * moveSpeed;
-        }
-        if(keys['KeyA']) {
-            let strafeX = dirY, strafeY = -dirX;
-            if(worldMap[Math.floor(posX + strafeX * moveSpeed)][Math.floor(posY)] === 0) posX += strafeX * moveSpeed;
-            if(worldMap[Math.floor(posX)][Math.floor(posY + strafeY * moveSpeed)] === 0) posY += strafeY * moveSpeed;
-        }
-        if(keys['KeyD']) {
-            let strafeX = -dirY, strafeY = dirX;
-            if(worldMap[Math.floor(posX + strafeX * moveSpeed)][Math.floor(posY)] === 0) posX += strafeX * moveSpeed;
-            if(worldMap[Math.floor(posX)][Math.floor(posY + strafeY * moveSpeed)] === 0) posY += strafeY * moveSpeed;
-        }
+        if(worldMap[Math.floor(nextX)][Math.floor(posY)] === 0) posX = nextX;
+        if(worldMap[Math.floor(posX)][Math.floor(nextY)] === 0) posY = nextY;
 
         if(!hostConn && slenderman.active) {
-            let target = { x: posX, y: posY }; 
-            let angle = Math.atan2(target.y - slenderman.y, target.x - slenderman.x);
-            slenderman.x += Math.cos(angle) * 0.02;
-            slenderman.y += Math.sin(angle) * 0.02;
+            let angle = Math.atan2(posY - slenderman.y, posX - slenderman.x);
+            slenderman.x += Math.cos(angle) * 0.022;
+            slenderman.y += Math.sin(angle) * 0.022;
 
             if(Math.hypot(posX - slenderman.x, posY - slenderman.y) < 0.4) {
-                let playerCount = Object.keys(players).length;
-                if(playerCount <= 1) {
-                    alert("FIN: Slenderman te atrapó.");
-                    location.reload(); 
+                if(Object.keys(players).length <= 1) {
+                    alert("Slenderman te atrapó."); location.reload();
                 } else {
                     isDead = true;
                     document.getElementById('ui').classList.remove('hidden');
-                    document.getElementById('status-msg').innerText = "ESTÁS MUERTO (MODO ESPECTADOR)";
+                    document.getElementById('status-msg').innerText = "MUERTO - MODO ESPECTADOR";
                     document.exitPointerLock();
-                    broadcast({ type: 'chat', sender: 'Sistema', text: `El jugador ${myId.substring(0,4)} ha muerto.` });
                 }
             }
             syncToAll();
@@ -269,10 +267,8 @@
 
         notes.forEach((n, i) => {
             if(!n.collected && Math.hypot(posX - n.x, posY - n.y) < 0.5) {
-                if(!hostConn) { 
-                    n.collected = true; notesCollected++; 
-                    syncToAll(); 
-                } else { hostConn.send({type: 'collect', index: i}); }
+                if(!hostConn) { n.collected = true; notesCollected++; syncToAll(); } 
+                else { hostConn.send({type: 'collect', index: i}); }
             }
         });
     }
@@ -286,7 +282,7 @@
 
         if(!gameStarted) {
             ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.font = "20px Courier New";
-            ctx.fillText("LOBBY: ESPERANDO INICIO", w/2, h/2);
+            ctx.fillText("ESPERANDO JUGADORES...", w/2, h/2);
             requestAnimationFrame(render); return;
         }
 
@@ -312,19 +308,16 @@
             let perpDist = (side === 0) ? (sideDistX - deltaX) : (sideDistY - deltaY);
             zBuffer[x] = perpDist;
             let lineHeight = Math.floor(h / perpDist);
-            let b = Math.max(0, 220 - (perpDist * 30));
-            ctx.strokeStyle = `rgb(${side === 1 ? b*0.6 : b},${side === 1 ? b*0.6 : b},${side === 1 ? b*0.6 : b})`;
+            let b = Math.max(0, 200 - (perpDist * 25));
+            ctx.strokeStyle = `rgb(${side === 1 ? b*0.5 : b},${side === 1 ? b*0.5 : b},${side === 1 ? b*0.5 : b})`;
             ctx.beginPath(); ctx.moveTo(x, h/2 - lineHeight/2); ctx.lineTo(x, h/2 + lineHeight/2); ctx.stroke();
         }
 
         let sprites = [];
         notes.forEach(n => { if(!n.collected) sprites.push({ ...n, color: "white", sX: 0.15, sY: 0.2 }); });
         if(slenderman.active) sprites.push({ ...slenderman, color: "black", sX: 0.5, sY: 1.8, isSlender: true });
-        
         for(let id in players) {
-            if(id !== myId && !players[id].isDead) {
-                sprites.push({ ...players[id], color: players[id].color, sX: 0.4, sY: 0.6 });
-            }
+            if(id !== myId && !players[id].isDead) sprites.push({ ...players[id], sX: 0.4, sY: 0.6 });
         }
 
         sprites.sort((a,b) => Math.hypot(posX-b.x, posY-b.y) - Math.hypot(posX-a.x, posY-a.y));
@@ -336,13 +329,11 @@
                 let screenX = Math.floor((w/2) * (1 + transX / transY));
                 let sH = Math.abs(Math.floor(h / transY)) * s.sY, sW = Math.abs(Math.floor(h / transY)) * s.sX;
                 if(screenX > 0 && screenX < w && transY < zBuffer[screenX]) {
-                    ctx.fillStyle = s.color;
+                    ctx.fillStyle = s.color || "#e67e22";
                     ctx.fillRect(screenX - sW/2, h/2 - sH/2, sW, sH);
                     if(s.isSlender && transY < 3.5 && !isDead) {
-                        for(let i=0; i<300; i++) {
-                            ctx.fillStyle = `rgba(255,255,255,${Math.random()*0.15})`;
-                            ctx.fillRect(Math.random()*w, Math.random()*h, 2, 2);
-                        }
+                        ctx.fillStyle = `rgba(255,255,255,${Math.random()*0.2})`;
+                        ctx.fillRect(0,0,w,h);
                     }
                 }
             }
